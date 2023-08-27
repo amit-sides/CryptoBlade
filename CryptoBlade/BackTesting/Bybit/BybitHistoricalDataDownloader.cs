@@ -40,7 +40,7 @@ namespace CryptoBlade.BackTesting.Bybit
                     var missingDays = await m_historicalDataStorage.FindMissingDaysAsync(symbol, from, to, cancel);
                     var missingDaysSet = new HashSet<DateTime>(missingDays);
 
-                    // run 4 days in parallel use semaphore
+                    // run 8 days in parallel use semaphore
                     var tasks = new List<Task>();
                     using var semaphore = new SemaphoreSlim(8);
                     var asyncLock = new AsyncLock();

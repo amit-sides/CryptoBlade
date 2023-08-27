@@ -36,6 +36,9 @@ namespace CryptoBlade.Strategies
             if (string.Equals("Tartaglia", strategyName, StringComparison.OrdinalIgnoreCase))
                 return CreateTartagliaStrategy(config, symbol);
 
+            if (string.Equals("Mona", strategyName, StringComparison.OrdinalIgnoreCase))
+                return CreateMonaStrategy(config, symbol);
+
             return CreateAutoHedgeStrategy(config, symbol);
         }
 
@@ -46,6 +49,7 @@ namespace CryptoBlade.Strategies
                 {
                     strategyOptions.MinimumPriceDistance = config.MinimumPriceDistance;
                     strategyOptions.MinimumVolume = config.MinimumVolume;
+                    strategyOptions.MinReentryPositionDistance = config.Strategies.AutoHedge.MinReentryPositionDistance;
                 });
             return new AutoHedgeStrategy(options, symbol, m_walletManager, m_restClient);
         }
@@ -99,6 +103,21 @@ namespace CryptoBlade.Strategies
             return new TartagliaStrategy(options, symbol, m_walletManager, m_restClient);
         }
 
+        private ITradingStrategy CreateMonaStrategy(TradingBotOptions config, string symbol)
+        {
+            var options = CreateTradeOptions<MonaStrategyOptions>(config, symbol,
+                strategyOptions =>
+                {
+                    strategyOptions.MinimumPriceDistance = config.MinimumPriceDistance;
+                    strategyOptions.MinimumVolume = config.MinimumVolume;
+                    strategyOptions.BandwidthCoefficient = config.Strategies.Mona.BandwidthCoefficient;
+                    strategyOptions.MinReentryPositionDistanceLong = config.Strategies.Mona.MinReentryPositionDistanceLong;
+                    strategyOptions.MinReentryPositionDistanceShort = config.Strategies.Mona.MinReentryPositionDistanceShort;
+                    strategyOptions.ClusteringLength = config.Strategies.Mona.ClusteringLength;
+                });
+            return new MonaStrategy(options, symbol, m_walletManager, m_restClient);
+        }
+
         private IOptions<TOptions> CreateTradeOptions<TOptions>(TradingBotOptions config, string symbol, Action<TOptions> optionsSetup) 
             where TOptions : TradingStrategyBaseOptions, new()
         {
@@ -119,6 +138,7 @@ namespace CryptoBlade.Strategies
                 InitialUntradableDays = initialUntradableDays,
                 QtyFactor = config.QtyFactor,
                 EnableRecursiveQtyFactor = config.EnableRecursiveQtyFactor,
+                IgnoreInconsistency = isBackTest,
             };
             optionsSetup(options);
             return Options.Create(options);
