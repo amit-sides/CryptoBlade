@@ -21,22 +21,22 @@ namespace CryptoBlade.Strategies
         public ITradingStrategy CreateStrategy(TradingBotOptions config, string symbol)
         {
             string strategyName = config.StrategyName;
-            if (string.Equals("AutoHedge", strategyName, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(StrategyNames.AutoHedge, strategyName, StringComparison.OrdinalIgnoreCase))
                 return CreateAutoHedgeStrategy(config, symbol);
 
-            if (string.Equals("MfiRsiCandlePrecise", strategyName, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(StrategyNames.MfiRsiCandlePrecise, strategyName, StringComparison.OrdinalIgnoreCase))
                 return CreateMfiRsiCandlePreciseStrategy(config, symbol);
 
-            if (string.Equals("MfiRsiEriTrend", strategyName, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(StrategyNames.MfiRsiEriTrend, strategyName, StringComparison.OrdinalIgnoreCase))
                 return CreateMfiRsiEriTrendPreciseStrategy(config, symbol);
 
-            if (string.Equals("LinearRegression", strategyName, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(StrategyNames.LinearRegression, strategyName, StringComparison.OrdinalIgnoreCase))
                 return CreateLinearRegressionStrategy(config, symbol);
 
-            if (string.Equals("Tartaglia", strategyName, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(StrategyNames.Tartaglia, strategyName, StringComparison.OrdinalIgnoreCase))
                 return CreateTartagliaStrategy(config, symbol);
 
-            if (string.Equals("Mona", strategyName, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(StrategyNames.Mona, strategyName, StringComparison.OrdinalIgnoreCase))
                 return CreateMonaStrategy(config, symbol);
 
             return CreateAutoHedgeStrategy(config, symbol);
@@ -49,7 +49,8 @@ namespace CryptoBlade.Strategies
                 {
                     strategyOptions.MinimumPriceDistance = config.MinimumPriceDistance;
                     strategyOptions.MinimumVolume = config.MinimumVolume;
-                    strategyOptions.MinReentryPositionDistance = config.Strategies.AutoHedge.MinReentryPositionDistance;
+                    strategyOptions.MinReentryPositionDistanceLong = config.Strategies.AutoHedge.MinReentryPositionDistanceLong;
+                    strategyOptions.MinReentryPositionDistanceShort = config.Strategies.AutoHedge.MinReentryPositionDistanceShort;
                 });
             return new AutoHedgeStrategy(options, symbol, m_walletManager, m_restClient);
         }
@@ -72,6 +73,10 @@ namespace CryptoBlade.Strategies
                 {
                     strategyOptions.MinimumPriceDistance = config.MinimumPriceDistance;
                     strategyOptions.MinimumVolume = config.MinimumVolume;
+                    strategyOptions.MinReentryPositionDistanceLong = config.Strategies.MfiRsiEriTrend.MinReentryPositionDistanceLong;
+                    strategyOptions.MinReentryPositionDistanceShort = config.Strategies.MfiRsiEriTrend.MinReentryPositionDistanceShort;
+                    strategyOptions.MfiRsiLookbackPeriod = config.Strategies.MfiRsiEriTrend.MfiRsiLookbackPeriod;
+                    strategyOptions.UseEriOnly = config.Strategies.MfiRsiEriTrend.UseEriOnly;
                 });
             return new MfiRsiEriTrendTradingStrategy(options, symbol, m_walletManager, m_restClient);
         }
@@ -96,9 +101,12 @@ namespace CryptoBlade.Strategies
                 {
                     strategyOptions.MinimumPriceDistance = config.MinimumPriceDistance;
                     strategyOptions.MinimumVolume = config.MinimumVolume;
-                    strategyOptions.ChannelLength = config.Strategies.Tartaglia.ChannelLength;
-                    strategyOptions.StandardDeviation = config.Strategies.Tartaglia.StandardDeviation;
-                    strategyOptions.MinReentryPositionDistance = config.Strategies.Tartaglia.MinReentryPositionDistance;
+                    strategyOptions.ChannelLengthLong = config.Strategies.Tartaglia.ChannelLengthLong;
+                    strategyOptions.ChannelLengthShort = config.Strategies.Tartaglia.ChannelLengthShort;
+                    strategyOptions.StandardDeviationLong = config.Strategies.Tartaglia.StandardDeviationLong;
+                    strategyOptions.StandardDeviationShort = config.Strategies.Tartaglia.StandardDeviationShort;
+                    strategyOptions.MinReentryPositionDistanceLong = config.Strategies.Tartaglia.MinReentryPositionDistanceLong;
+                    strategyOptions.MinReentryPositionDistanceShort = config.Strategies.Tartaglia.MinReentryPositionDistanceShort;
                 });
             return new TartagliaStrategy(options, symbol, m_walletManager, m_restClient);
         }
@@ -114,6 +122,7 @@ namespace CryptoBlade.Strategies
                     strategyOptions.MinReentryPositionDistanceLong = config.Strategies.Mona.MinReentryPositionDistanceLong;
                     strategyOptions.MinReentryPositionDistanceShort = config.Strategies.Mona.MinReentryPositionDistanceShort;
                     strategyOptions.ClusteringLength = config.Strategies.Mona.ClusteringLength;
+                    strategyOptions.MfiRsiLookback = config.Strategies.Mona.MfiRsiLookback;
                 });
             return new MonaStrategy(options, symbol, m_walletManager, m_restClient);
         }
@@ -136,9 +145,13 @@ namespace CryptoBlade.Strategies
                 ForceUnstuckPercentStep = config.Unstucking.ForceUnstuckPercentStep,
                 SlowUnstuckPercentStep = config.Unstucking.SlowUnstuckPercentStep,
                 InitialUntradableDays = initialUntradableDays,
-                QtyFactor = config.QtyFactor,
-                EnableRecursiveQtyFactor = config.EnableRecursiveQtyFactor,
+                EnableRecursiveQtyFactorLong = config.EnableRecursiveQtyFactorLong,
+                EnableRecursiveQtyFactorShort = config.EnableRecursiveQtyFactorShort,
+                QtyFactorLong = config.QtyFactorLong,
+                QtyFactorShort = config.QtyFactorShort,
                 IgnoreInconsistency = isBackTest,
+                NormalizedAverageTrueRangePeriod = config.NormalizedAverageTrueRangePeriod,
+                StrategySelectPreference = config.StrategySelectPreference,
             };
             optionsSetup(options);
             return Options.Create(options);

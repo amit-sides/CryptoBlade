@@ -1,4 +1,5 @@
-﻿using CryptoBlade.Models;
+﻿using Accord.Statistics.Models.Regression.Linear;
+using CryptoBlade.Models;
 using CryptoBlade.Strategies.Wallet;
 using Skender.Stock.Indicators;
 
@@ -68,12 +69,14 @@ namespace CryptoBlade.Helpers
                 decimal totalFee = entryFee + exitFee;
                 decimal feeInPrice = totalFee / position.Quantity;
                 shortTakeProfit -= feeInPrice;
-                shortTakeProfit = Math.Round(shortTakeProfit, (int)symbolInfo.PriceScale, MidpointRounding.AwayFromZero);
+                shortTakeProfit = Math.Round(shortTakeProfit, (int)symbolInfo.PriceScale,
+                    MidpointRounding.AwayFromZero);
                 if (minProfitRate >= 1.0m)
                     minProfitRate = 0.99m;
                 decimal shortMinTakeProfit = position.AveragePrice * (1.0m - minProfitRate);
                 shortMinTakeProfit -= feeInPrice;
-                shortMinTakeProfit = Math.Round(shortMinTakeProfit, (int)symbolInfo.PriceScale, MidpointRounding.AwayFromZero);
+                shortMinTakeProfit = Math.Round(shortMinTakeProfit, (int)symbolInfo.PriceScale,
+                    MidpointRounding.AwayFromZero);
 
                 if (shortTakeProfit > shortMinTakeProfit)
                     shortTakeProfit = shortMinTakeProfit;
@@ -81,7 +84,7 @@ namespace CryptoBlade.Helpers
                 if (currentPrice.BestBidPrice < shortTakeProfit)
                     shortTakeProfit = currentPrice.BestBidPrice;
 
-                if(shortTakeProfit <= 0)
+                if (shortTakeProfit <= 0)
                     shortTakeProfit = (decimal)Math.Pow(10, -(int)symbolInfo.PriceScale);
 
                 return shortTakeProfit;
@@ -117,7 +120,8 @@ namespace CryptoBlade.Helpers
 
                 decimal longMinTakeProfit = position.AveragePrice * (1.0m + minProfitRate);
                 longMinTakeProfit += feeInPrice;
-                longMinTakeProfit = Math.Round(longMinTakeProfit, (int)symbolInfo.PriceScale, MidpointRounding.AwayFromZero);
+                longMinTakeProfit = Math.Round(longMinTakeProfit, (int)symbolInfo.PriceScale,
+                    MidpointRounding.AwayFromZero);
 
                 if (longTakeProfit < longMinTakeProfit)
                     longTakeProfit = longMinTakeProfit;
@@ -140,6 +144,71 @@ namespace CryptoBlade.Helpers
         public static bool CrossesAbove(this Quote quote, double priceLevel)
         {
             return (double)quote.Low < priceLevel && (double)quote.High > priceLevel;
+        }
+
+        public static LinearChannelPrice CalculateExpectedPrice(Quote[] quotes, int channelLength)
+        {
+            int quotesLength = quotes.Length;
+            int skip = quotesLength - channelLength;
+            if (skip < 0)
+                return new LinearChannelPrice(null, null); // not enough quotes
+            OrdinaryLeastSquares ols = new OrdinaryLeastSquares();
+            double[] priceData = new double[channelLength];
+            double[] xAxis = new double[channelLength];
+            for (int i = 0; i < channelLength; i++)
+            {
+                var averagePrice = (quotes[i + skip].Open + quotes[i + skip].Close) / 2.0m;
+                priceData[i] = (double)averagePrice;
+                xAxis[i] = i;
+            }
+
+            var lr = ols.Learn(xAxis, priceData.ToArray());
+            var intercept = lr.Intercept;
+            var slope = lr.Slope;
+            var expectedPrice = intercept + slope * quotes.Length;
+            var standardDeviation = StandardDeviation(priceData);
+
+            return new LinearChannelPrice(expectedPrice, standardDeviation);
+        }
+
+        public static double StandardDeviation(double[] data)
+        {
+            double mean = data.Sum() / data.Length;
+            double sumOfSquares = 0;
+            for (int i = 0; i < data.Length; i++)
+            {
+                var x = data[i];
+                sumOfSquares += (x - mean) * (x - mean);
+            }
+
+            return Math.Sqrt(sumOfSquares / data.Length);
+        }
+
+        public static double RootMeanSquareError(IReadOnlyList<double> estimated, IReadOnlyList<double> measured)
+        {
+            double sum = 0;
+            for (int i = 0; i < estimated.Count; i++)
+            {
+                var error = estimated[i] - measured[i];
+                sum += error * error;
+            }
+
+            return Math.Sqrt(sum / estimated.Count);
+        }
+
+        public static double NormalizedRootMeanSquareError(IReadOnlyList<double> estimated, IReadOnlyList<double> measured)
+        {
+            double sum = 0;
+            for (int i = 0; i < estimated.Count; i++)
+            {
+                var error = estimated[i] - measured[i];
+                sum += error * error;
+            }
+            var average = measured.Average();
+            var nrmse = Math.Sqrt(sum / estimated.Count) / average;
+            if (nrmse > 1)
+                nrmse = 1;
+            return nrmse;
         }
     }
 }

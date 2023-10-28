@@ -1,6 +1,7 @@
 using Bybit.Net.Clients;
 using CryptoBlade.BackTesting;
 using CryptoBlade.BackTesting.Bybit;
+using CryptoBlade.Configuration;
 using CryptoBlade.Exchanges;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -32,7 +33,7 @@ namespace CryptoBlade.Tests.BackTesting.Bybit
         {
             var options = Options.Create(new ProtoHistoricalDataStorageOptions
             {
-                Directory = "HistoricalData",
+                Directory = ConfigConstants.DefaultHistoricalDataDirectory,
             });
             var storage = new ProtoHistoricalDataStorage(options);
             var bybit = new BybitRestClient();
@@ -49,7 +50,7 @@ namespace CryptoBlade.Tests.BackTesting.Bybit
             var start = new DateTime(2023, 8, 1);
             var end = new DateTime(2023, 8, 12);
             const string symbol = "SOLUSDT";
-            await downloader.DownloadRangeAsync(symbol, new HistoricalDataInclude(false, true), start, end);
+            await downloader.DownloadRangeAsync(symbol, new HistoricalDataInclude(false, true, true), start, end);
             var missingDays = await storage.FindMissingDaysAsync(symbol, start, end);
             Assert.Empty(missingDays);
             var dayData = await storage.ReadAsync(symbol, start);

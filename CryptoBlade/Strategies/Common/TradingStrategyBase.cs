@@ -28,6 +28,12 @@ namespace CryptoBlade.Strategies.Common
         {
             m_logger = ApplicationLogging.CreateLogger(GetType().FullName ?? nameof(TradingStrategyBase));
             RequiredTimeFrameWindows = requiredTimeFrames;
+            if (options.Value.StrategySelectPreference == StrategySelectPreference.NormalizedAverageTrueRange)
+            {
+                RequiredTimeFrameWindows = RequiredTimeFrameWindows
+                    .Append(new TimeFrameWindow(TimeFrame.OneHour, options.Value.NormalizedAverageTrueRangePeriod, false))
+                    .ToArray();
+            }
             m_walletManager = walletManager;
             m_cbFuturesRestClient = cbFuturesRestClient;
             m_options = options;
@@ -88,6 +94,8 @@ namespace CryptoBlade.Strategies.Common
         public DateTime? LastCandleShortOrder { get; set; }
         public DateTime? LastCandleLongUnstuckOrder { get; set; }
         public DateTime? LastCandleShortUnstuckOrder { get; set; }
+        public decimal? CurrentExposureLong { get; protected set; }
+        public decimal? CurrentExposureShort { get; protected set; }
         protected virtual bool UseMarketOrdersForEntries => false;
 
         public Task UpdateTradingStateAsync(Position? longPosition, Position? shortPosition, Order[] orders, CancellationToken cancel)
@@ -102,15 +110,21 @@ namespace CryptoBlade.Strategies.Common
             IsInShortTrade = shortPosition != null || SellOrders.Length > 0;
             UnrealizedLongPnlPercent = null;
             UnrealizedShortPnlPercent = null;
+            CurrentExposureLong = null;
+            CurrentExposureShort = null;
             var balance = m_walletManager.Contract;
-            if (longPosition != null && Ticker != null && balance.WalletBalance.HasValue)
+            if (longPosition != null && Ticker != null && balance.WalletBalance.HasValue && balance.WalletBalance.Value > 0)
             {
+                var longValue = longPosition.Quantity * Ticker.LastPrice;
+                CurrentExposureLong = longValue / balance.WalletBalance.Value;
                 var longPositionValue = (Ticker.LastPrice - longPosition.AveragePrice) * longPosition.Quantity;
                 UnrealizedLongPnlPercent = longPositionValue / balance.WalletBalance.Value;
             }
 
-            if (shortPosition != null && Ticker != null && balance.WalletBalance.HasValue)
+            if (shortPosition != null && Ticker != null && balance.WalletBalance.HasValue && balance.WalletBalance.Value > 0)
             {
+                var shortValue = shortPosition.Quantity * Ticker.LastPrice;
+                CurrentExposureShort = shortValue / balance.WalletBalance.Value;
                 var shortPositionValue = (shortPosition.AveragePrice - Ticker.LastPrice) * shortPosition.Quantity;
                 UnrealizedShortPnlPercent = shortPositionValue / balance.WalletBalance.Value;
             }
@@ -169,14 +183,12 @@ namespace CryptoBlade.Strategies.Common
                     consistent = false;
             }
 
-            QueueInitialized = true;
+            QueueInitialized = consistent;
 
             await ProcessCandleBuffer();
 
             Ticker = ticker;
             ConsistentData = consistent;
-
-            await EvaluateSignalsAsync(cancel);
         }
 
         public async Task ExecuteAsync(ExecuteParams executeParams, CancellationToken cancel)
@@ -311,7 +323,8 @@ namespace CryptoBlade.Strategies.Common
                     && dynamicQtyLong.HasValue
                     && NoTradeForCandle(lastPrimaryQuote, LastCandleLongOrder)
                     && LongFundingWithinLimit(ticker)
-                    && !executeParams.LongUnstucking)
+                    && !executeParams.LongUnstucking
+                    && executeParams.AllowExtraLong)
                 {
                     m_logger.LogDebug($"{Name}: {Symbol} trying to add to open long position");
                     if (UseMarketOrdersForEntries)
@@ -329,7 +342,8 @@ namespace CryptoBlade.Strategies.Common
                     && dynamicQtyShort.HasValue
                     && NoTradeForCandle(lastPrimaryQuote, LastCandleShortOrder)
                     && ShortFundingWithinLimit(ticker)
-                    && !executeParams.ShortUnstucking)
+                    && !executeParams.ShortUnstucking
+                    && executeParams.AllowExtraShort)
                 {
                     m_logger.LogDebug($"{Name}: {Symbol} trying to add to open short position");
                     if (UseMarketOrdersForEntries)
@@ -427,13 +441,10 @@ namespace CryptoBlade.Strategies.Common
             var ticker = Ticker;
             if(ticker == null)
                 return false;
-            var dynamicQtyLong = DynamicQtyLong;
-            if(dynamicQtyLong == null)
-                return false;
 
             decimal unstuckQuantity = forceKill
                 ? longPosition.Quantity
-                : CalculateUnstuckingQuantity(longPosition.Quantity, force, dynamicQtyLong.Value);
+                : CalculateUnstuckingQuantity(longPosition.Quantity, force);
 
             foreach (Order longTakeProfitOrder in longTakeProfitOrders)
             {
@@ -454,13 +465,10 @@ namespace CryptoBlade.Strategies.Common
             var ticker = Ticker;
             if (ticker == null)
                 return false;
-            var dynamicQtyShort = DynamicQtyShort;
-            if (dynamicQtyShort == null)
-                return false;
 
             decimal unstuckQuantity = forceKill 
                 ? shortPosition.Quantity 
-                : CalculateUnstuckingQuantity(shortPosition.Quantity, force, dynamicQtyShort.Value);
+                : CalculateUnstuckingQuantity(shortPosition.Quantity, force);
 
             foreach (Order shortTakeProfitOrder in shortTakeProfitOrders)
             {
@@ -472,10 +480,10 @@ namespace CryptoBlade.Strategies.Common
             return orderPlaced;
         }
 
-        private decimal CalculateUnstuckingQuantity(decimal positionQuantity, bool force, decimal dynamicQuantity)
+        private decimal CalculateUnstuckingQuantity(decimal positionQuantity, bool force)
         {
-            if (!SymbolInfo.QtyStep.HasValue)
-                return dynamicQuantity;
+            if(!SymbolInfo.QtyStep.HasValue)
+                return positionQuantity; // this should not happen
 
             decimal unstuckQuantity;
             if (force)
@@ -484,8 +492,6 @@ namespace CryptoBlade.Strategies.Common
                 unstuckQuantity = positionQuantity * m_options.Value.SlowUnstuckPercentStep;
 
             unstuckQuantity -= (unstuckQuantity % SymbolInfo.QtyStep.Value);
-            if (unstuckQuantity < dynamicQuantity)
-                unstuckQuantity = dynamicQuantity;
             if(unstuckQuantity > positionQuantity)
                 unstuckQuantity = positionQuantity;
 
@@ -504,33 +510,30 @@ namespace CryptoBlade.Strategies.Common
             if (QueueInitialized)
             {
                 await ProcessCandleBuffer();
-                await EvaluateSignalsAsync(cancel);
             }
         }
 
-        public async Task UpdatePriceDataSync(Ticker ticker, CancellationToken cancel)
+        public Task UpdatePriceDataSync(Ticker ticker, CancellationToken cancel)
         {
             Ticker = ticker;
             LastTickerUpdate = ticker.Timestamp;
-            if (QueueInitialized)
-            {
-                await EvaluateSignalsAsync(cancel);
-            }
+            return Task.CompletedTask;
         }
 
         protected virtual async Task CalculateDynamicQtyAsync()
         {
-            if (!m_options.Value.EnableRecursiveQtyFactor)
-            {
-                await CalculateDynamicQtyFixedAsync();
-            }
+            if (!m_options.Value.EnableRecursiveQtyFactorLong)
+                await CalculateDynamicQtyLongFixedAsync();
             else
-            {
-                await CalculateDynamicQtyFactorAsync();
-            }
+                await CalculateDynamicQtyLongFactorAsync();
+            
+            if(!m_options.Value.EnableRecursiveQtyFactorShort)
+                await CalculateDynamicQtyShortFixedAsync();
+            else
+                await CalculateDynamicQtyShortFactorAsync();
         }
 
-        protected virtual Task CalculateDynamicQtyFixedAsync()
+        protected virtual Task CalculateDynamicQtyShortFixedAsync()
         {
             var ticker = Ticker;
             if (ticker == null)
@@ -538,38 +541,84 @@ namespace CryptoBlade.Strategies.Common
 
             if (!DynamicQtyShort.HasValue || !IsInTrade)
                 DynamicQtyShort = CalculateDynamicQty(ticker.BestAskPrice, WalletExposureShort);
+
+            return Task.CompletedTask;
+        }
+
+        protected virtual Task CalculateDynamicQtyLongFixedAsync()
+        {
+            var ticker = Ticker;
+            if (ticker == null)
+                return Task.CompletedTask;
+
             if (!DynamicQtyLong.HasValue || !IsInTrade)
                 DynamicQtyLong = CalculateDynamicQty(ticker.BestBidPrice, WalletExposureLong);
 
             return Task.CompletedTask;
         }
 
-        protected virtual Task CalculateDynamicQtyFactorAsync()
+        protected virtual Task CalculateDynamicQtyLongFactorAsync()
         {
             var ticker = Ticker;
             if (ticker == null)
                 return Task.CompletedTask; 
             var longPosition = LongPosition; 
-            var shortPosition = ShortPosition; 
-            if (shortPosition == null) 
-                DynamicQtyShort = CalculateDynamicQty(ticker.BestAskPrice, WalletExposureShort);
-            else
-            {
-                DynamicQtyShort = shortPosition.Quantity * m_options.Value.QtyFactor;
-                if(SymbolInfo.MinOrderQty > DynamicQtyShort)
-                    DynamicQtyShort = SymbolInfo.MinOrderQty;
-            }
-                
                 
             if (longPosition == null)
                 DynamicQtyLong = CalculateDynamicQty(ticker.BestBidPrice, WalletExposureLong);
             else
             {
-                DynamicQtyLong = longPosition.Quantity * m_options.Value.QtyFactor;
-                if(SymbolInfo.MinOrderQty > DynamicQtyLong)
-                    DynamicQtyLong = SymbolInfo.MinOrderQty;
+                var walletBalance = m_walletManager.Contract.WalletBalance;
+                var positionValue = longPosition.Quantity * longPosition.AveragePrice;
+                var remainingExposure = (m_options.Value.WalletExposureLong * walletBalance) - positionValue;
+                if (remainingExposure <= 0)
+                    DynamicQtyLong = null;
+                else
+                {
+                    var remainingQty = remainingExposure / ticker.BestBidPrice;
+                    DynamicQtyLong = longPosition.Quantity * m_options.Value.QtyFactorLong;
+                    if (DynamicQtyLong > remainingQty)
+                        DynamicQtyLong = remainingQty;
+                    var symbolInfo = SymbolInfo;
+                    if (symbolInfo.QtyStep.HasValue)
+                        DynamicQtyLong -= (DynamicQtyLong % symbolInfo.QtyStep.Value);
+                    if (SymbolInfo.MinOrderQty > DynamicQtyLong)
+                        DynamicQtyLong = SymbolInfo.MinOrderQty;
+                }
             }
             
+            return Task.CompletedTask;
+        }
+
+        protected virtual Task CalculateDynamicQtyShortFactorAsync()
+        {
+            var ticker = Ticker;
+            if (ticker == null)
+                return Task.CompletedTask;
+            var shortPosition = ShortPosition;
+            if (shortPosition == null)
+                DynamicQtyShort = CalculateDynamicQty(ticker.BestAskPrice, WalletExposureShort);
+            else
+            {
+                var walletBalance = m_walletManager.Contract.WalletBalance;
+                var positionValue = shortPosition.Quantity * shortPosition.AveragePrice;
+                var remainingExposure = (m_options.Value.WalletExposureShort * walletBalance) - positionValue;
+                if(remainingExposure <= 0)
+                    DynamicQtyShort = null;
+                else
+                {
+                    var remainingQty = remainingExposure / ticker.BestAskPrice;
+                    DynamicQtyShort = shortPosition.Quantity * m_options.Value.QtyFactorShort;
+                    if (DynamicQtyShort > remainingQty)
+                        DynamicQtyShort = remainingQty;
+                    var symbolInfo = SymbolInfo;
+                    if(symbolInfo.QtyStep.HasValue)
+                        DynamicQtyShort -= (DynamicQtyShort % symbolInfo.QtyStep.Value);
+                    if (SymbolInfo.MinOrderQty > DynamicQtyShort)
+                        DynamicQtyShort = SymbolInfo.MinOrderQty;
+                }
+            }
+
             return Task.CompletedTask;
         }
 
@@ -618,7 +667,7 @@ namespace CryptoBlade.Strategies.Common
             return Task.CompletedTask;
         }
 
-        protected virtual async Task EvaluateSignalsAsync(CancellationToken cancel)
+        public virtual async Task EvaluateSignalsAsync(CancellationToken cancel)
         {
             HasBuySignal = false;
             HasSellSignal = false;
@@ -652,6 +701,19 @@ namespace CryptoBlade.Strategies.Common
                 new StrategyIndicator(nameof(IndicatorType.SellExtra), HasSellExtraSignal)
             };
             indicators.AddRange(signalEvaluation.Indicators);
+            if (m_options.Value.StrategySelectPreference == StrategySelectPreference.NormalizedAverageTrueRange)
+            {
+                var quotes = QuoteQueues[TimeFrame.OneHour].GetQuotes();
+                var atr = quotes.GetAtr();
+                var lastAtr = atr.LastOrDefault();
+                if (lastAtr != null && lastAtr.Atr.HasValue)
+                {
+                    var normalizedAtr = (lastAtr.Atr.Value / (double)ticker.BestAskPrice) * 100;
+                    normalizedAtr = Math.Round(normalizedAtr, 6);
+                    indicators.Add(new StrategyIndicator(nameof(IndicatorType.NormalizedAverageTrueRange), (decimal)normalizedAtr));
+                }
+            }
+
             await CalculateTakeProfitAsync(indicators);
             Indicators = indicators.ToArray();
         }
@@ -665,8 +727,12 @@ namespace CryptoBlade.Strategies.Common
                 bool consistent = QuoteQueues[bufferedCandle.TimeFrame].Enqueue(bufferedCandle.ToQuote());
                 if (!consistent)
                 {
-                    if(!m_options.Value.IgnoreInconsistency)
+                    if (!m_options.Value.IgnoreInconsistency)
+                    {
                         ConsistentData = false;
+                        QueueInitialized = false;
+                    }
+                        
                     m_logger.LogWarning($"Inconsistent data for {bufferedCandle.TimeFrame} candle {bufferedCandle.StartTime} for symbol {Symbol}");
                 }
                 if(bufferedCandle.TimeFrame == TimeFrame.OneMinute)

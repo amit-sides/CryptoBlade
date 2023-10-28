@@ -15,12 +15,14 @@ namespace CryptoBlade.BackTesting
         private readonly IHistoricalDataStorage m_historicalDataStorage;
         private DateTime m_currentTime;
         private DateTime? m_nextTime;
-        private readonly Dictionary<string, CandleBacktestProcessor> m_candleProcessors;
+        private readonly Dictionary<string, BackTestDataProcessor> m_candleProcessors;
         private readonly AsyncLock m_lock;
         private readonly HashSet<CandleUpdateSubscription> m_candleSubscriptions;
         private readonly HashSet<TickerUpdateSubscription> m_tickerSubscriptions;
         private readonly HashSet<BalanceUpdateSubscription> m_balanceSubscriptions;
         private readonly HashSet<OrderUpdateSubscription> m_orderSubscriptions;
+        private readonly HashSet<NextStepSubscription> m_nextStepSubscriptions;
+        private readonly HashSet<FundRateFeeSubscription> m_fundingRateFeeSubscriptions;
         private readonly ICbFuturesRestClient m_cbFuturesRestClient;
         private Balance m_currentBalance;
         private readonly Dictionary<string, HashSet<Order>> m_openOrders;
@@ -37,7 +39,9 @@ namespace CryptoBlade.BackTesting
             m_tickerSubscriptions = new HashSet<TickerUpdateSubscription>();
             m_balanceSubscriptions = new HashSet<BalanceUpdateSubscription>();
             m_orderSubscriptions = new HashSet<OrderUpdateSubscription>();
-            m_candleProcessors = new Dictionary<string, CandleBacktestProcessor>();
+            m_nextStepSubscriptions = new HashSet<NextStepSubscription>();
+            m_fundingRateFeeSubscriptions = new HashSet<FundRateFeeSubscription>();
+            m_candleProcessors = new Dictionary<string, BackTestDataProcessor>();
             m_backTestDataDownloader = backTestDataDownloader;
             m_historicalDataStorage = historicalDataStorage;
             m_cbFuturesRestClient = cbFuturesRestClient;
@@ -50,6 +54,8 @@ namespace CryptoBlade.BackTesting
         }
         
         public DateTime CurrentTime => m_currentTime;
+
+        public decimal SpotBalance { get; private set; }
 
         public Task<OpenPositionWithOrders[]> GetOpenPositionsWithOrdersAsync(CancellationToken cancel = default)
         {
@@ -470,6 +476,11 @@ namespace CryptoBlade.BackTesting
             return positions;
         }
 
+        public Task<FundingRate[]> GetFundingRatesAsync(string symbol, DateTime start, DateTime end, CancellationToken cancel = default)
+        {
+            throw new NotSupportedException("Not needed for the client. Funding rates are sent in ticker data");
+        }
+
         public Task<IUpdateSubscription> SubscribeToWalletUpdatesAsync(Action<Balance> handler, CancellationToken cancel = default)
         {
             var subscription = new BalanceUpdateSubscription(this, handler);
@@ -499,6 +510,21 @@ namespace CryptoBlade.BackTesting
             return Task.FromResult<IUpdateSubscription>(subscription);
         }
 
+        public Task<IUpdateSubscription> SubscribeToNextStepAsync(Action<DateTime> handler, CancellationToken cancel = default)
+        {
+            NextStepSubscription subscription = new NextStepSubscription(this, handler);
+            m_nextStepSubscriptions.Add(subscription);
+            return Task.FromResult<IUpdateSubscription>(subscription);
+        }
+
+        public Task<IUpdateSubscription> SubscribeToFundingRateFeeUpdatesAsync(Action<string, decimal> handler,
+            CancellationToken cancel = default)
+        {
+            FundRateFeeSubscription subscription = new FundRateFeeSubscription(this, handler);
+            m_fundingRateFeeSubscriptions.Add(subscription);
+            return Task.FromResult<IUpdateSubscription>(subscription);
+        }
+
         public async Task PrepareDataAsync(CancellationToken cancel = default)
         {
             var start = m_options.Value.Start;
@@ -516,20 +542,20 @@ namespace CryptoBlade.BackTesting
             if (m_nextTime.HasValue)
                 m_currentTime = m_nextTime.Value;
             var currentTime = m_currentTime;
+            await NotifyNextStepAsync(currentTime);
             foreach (var backtestProcessor in m_candleProcessors)
             {
-                Candle[] candles = backtestProcessor.Value.AdvanceTime(currentTime);
-                foreach (var candle in candles)
+                var timeData = backtestProcessor.Value.AdvanceTime(currentTime);
+                foreach (var candle in timeData.Candles)
                 {
-                    // we should probably use trades data for this
                     if (candle.TimeFrame == TimeFrame.OneMinute)
                     {
-                        await ProcessPositionsAndOrdersAsync(backtestProcessor.Key, candle);
+                        await ProcessPositionsAndOrdersAsync(backtestProcessor.Key, candle, timeData.CurrentFundingRate);
                         foreach (TickerUpdateSubscription tickerUpdateSubscription in m_tickerSubscriptions)
                         {
                             tickerUpdateSubscription.Notify(backtestProcessor.Key, new Ticker
                             {
-                                FundingRate = null,
+                                FundingRate = timeData.LastFundingRate?.Rate,
                                 BestAskPrice = candle.Close,
                                 BestBidPrice = candle.Close,
                                 LastPrice = candle.Close,
@@ -568,6 +594,7 @@ namespace CryptoBlade.BackTesting
             var equity = walletBalance + balance.UnrealizedPnl;
             var newBalance = balance with { Equity = equity, WalletBalance = walletBalance };
             m_currentBalance = newBalance;
+            SpotBalance -= amount;
             await NotifyBalanceAsync(newBalance);
         }
 
@@ -578,10 +605,11 @@ namespace CryptoBlade.BackTesting
             var equity = walletBalance + balance.UnrealizedPnl;
             var newBalance = balance with { Equity = equity, WalletBalance = walletBalance };
             m_currentBalance = newBalance;
+            SpotBalance += amount;
             await NotifyBalanceAsync(newBalance);
         }
 
-        private async Task ProcessPositionsAndOrdersAsync(string symbol, Candle candle)
+        private async Task ProcessPositionsAndOrdersAsync(string symbol, Candle candle, FundingRate? fundingRate)
         {
             List<Order> filledOrders = new List<Order>();
             using (await m_lock.LockAsync())
@@ -685,12 +713,16 @@ namespace CryptoBlade.BackTesting
                 {
                     lp.UpdateUnrealizedProfitOrLoss(candle);
                     await UpdateUnrealizedBalanceAsync();
+                    if (fundingRate != null)
+                        await ApplyFundingRate(symbol, lp, fundingRate);
                 }
 
                 if (m_shortPositions.TryGetValue(symbol, out var sp))
                 {
                     sp.UpdateUnrealizedProfitOrLoss(candle);
                     await UpdateUnrealizedBalanceAsync();
+                    if (fundingRate != null)
+                        await ApplyFundingRate(symbol, sp, fundingRate);
                 }
             }
         }
@@ -742,9 +774,39 @@ namespace CryptoBlade.BackTesting
             await UpdateBalanceAsync(fee);
         }
 
+        private async Task AddFundingRateFeeToBalanceAsync(string symbol, decimal fee)
+        {
+            await UpdateBalanceAsync(fee);
+            await NotifyFundingRateFeeAsync(symbol, fee);
+        }
+
         private async Task UpdateUnrealizedBalanceAsync()
         {
             await UpdateBalanceAsync(0m);
+        }
+
+        private async Task ApplyFundingRate(string symbol, OpenPositionWithOrders position, FundingRate fundingRate)
+        {
+            var positionValue = position.Position.Quantity * position.Position.AveragePrice;
+            var fundingRateValue = positionValue * Math.Abs(fundingRate.Rate);
+            bool shortsPay = fundingRate.Rate < 0;
+            bool longsPay = fundingRate.Rate > 0;
+            if (position.Position.Side == PositionSide.Buy)
+            {
+                if (longsPay)
+                    await AddFundingRateFeeToBalanceAsync(symbol, -fundingRateValue);
+
+                if (shortsPay)
+                    await AddFundingRateFeeToBalanceAsync(symbol, fundingRateValue);
+            }
+            else if(position.Position.Side == PositionSide.Sell)
+            {
+                if (longsPay)
+                    await AddFundingRateFeeToBalanceAsync(symbol, fundingRateValue);
+
+                if (shortsPay)
+                    await AddFundingRateFeeToBalanceAsync(symbol, -fundingRateValue);
+            }
         }
 
         private async Task LoadDataForDayAsync(DateTime day, CancellationToken cancel = default)
@@ -754,7 +816,7 @@ namespace CryptoBlade.BackTesting
             foreach (string symbol in symbols)
             {
                 var dayData = await m_historicalDataStorage.ReadAsync(symbol, day, cancel);
-                var processor = new CandleBacktestProcessor(dayData);
+                var processor = new BackTestDataProcessor(dayData);
                 m_candleProcessors[symbol] = processor;
             }
         }
@@ -777,6 +839,20 @@ namespace CryptoBlade.BackTesting
             };
             foreach (var subscription in m_orderSubscriptions)
                 subscription.Notify(orderUpdate);
+            return Task.CompletedTask;
+        }
+
+        private Task NotifyNextStepAsync(DateTime time)
+        {
+            foreach (var subscription in m_nextStepSubscriptions)
+                subscription.Notify(time);
+            return Task.CompletedTask;
+        }
+
+        private Task NotifyFundingRateFeeAsync(string symbol, decimal fee)
+        {
+            foreach (var subscription in m_fundingRateFeeSubscriptions)
+                subscription.Notify(symbol, fee);
             return Task.CompletedTask;
         }
 
@@ -898,6 +974,62 @@ namespace CryptoBlade.BackTesting
             {
                 using var l = await m_exchange.m_lock.LockAsync();
                 m_exchange.m_orderSubscriptions.Remove(this);
+            }
+        }
+
+        private class NextStepSubscription : IUpdateSubscription
+        {
+            private readonly BackTestExchange m_exchange;
+            private readonly Action<DateTime> m_handler;
+
+            public NextStepSubscription(BackTestExchange exchange, Action<DateTime> handler)
+            {
+                m_exchange = exchange;
+                m_handler = handler;
+            }
+
+            public void Notify(DateTime time)
+            {
+                m_handler(time);
+            }
+
+            public void AutoReconnect(ILogger logger)
+            {
+                // no need to reconnect
+            }
+
+            public async Task CloseAsync()
+            {
+                using var l = await m_exchange.m_lock.LockAsync();
+                m_exchange.m_nextStepSubscriptions.Remove(this);
+            }
+        }
+
+        private class FundRateFeeSubscription : IUpdateSubscription
+        {
+            private readonly BackTestExchange m_exchange;
+            private readonly Action<string, decimal> m_handler;
+
+            public FundRateFeeSubscription(BackTestExchange exchange, Action<string, decimal> handler)
+            {
+                m_exchange = exchange;
+                m_handler = handler;
+            }
+
+            public void Notify(string symbol, decimal fee)
+            {
+                m_handler(symbol, fee);
+            }
+
+            public void AutoReconnect(ILogger logger)
+            {
+                // no need to reconnect
+            }
+
+            public async Task CloseAsync()
+            {
+                using var l = await m_exchange.m_lock.LockAsync();
+                m_exchange.m_fundingRateFeeSubscriptions.Remove(this);
             }
         }
         #endregion // Subscriptions

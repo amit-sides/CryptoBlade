@@ -53,10 +53,10 @@ namespace CryptoBlade.Tests.BackTesting
         [Fact]
         public async Task AllBackTestDataShouldBeDownloaded()
         {
-            var dataSource = DataSource.Bybit;
+            var dataSource = DataSource.Binance;
             var options = Options.Create(new ProtoHistoricalDataStorageOptions
             {
-                Directory = "HistoricalData",
+                Directory = ConfigConstants.DefaultHistoricalDataDirectory,
             });
             var storage = new ProtoHistoricalDataStorage(options);
             IHistoricalDataDownloader downloader;
@@ -73,8 +73,8 @@ namespace CryptoBlade.Tests.BackTesting
                     throw new ArgumentOutOfRangeException();
             }
             // ReSharper restore UnreachableSwitchCaseDueToIntegerAnalysis
-            var start = new DateTime(2023, 8, 1);
-            var end = new DateTime(2023, 8, 11);
+            var start = new DateTime(2023, 9, 1);
+            var end = new DateTime(2023, 10, 6);
             var symbols = new[]
             {
                 "SOLUSDT",

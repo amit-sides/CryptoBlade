@@ -5,7 +5,6 @@ using CryptoBlade.Strategies;
 using CryptoBlade.Strategies.Common;
 using CryptoBlade.Strategies.Wallet;
 using Microsoft.Extensions.Options;
-using System.Linq;
 
 namespace CryptoBlade.Services
 {
@@ -165,14 +164,16 @@ namespace CryptoBlade.Services
                 {
                     try
                     {
-                        await ProcessStrategyDataAsync(cancel);
-
                         var hasInconsistent = Strategies.Values.Any(x => !x.ConsistentData);
                         if (hasInconsistent)
                         {
                             m_logger.LogWarning("Some strategies have inconsistent data. Reinitialize.");
                             await ReInitializeStrategies(cancel);
                         }
+
+                        bool canContinue = await ProcessStrategyDataAsync(cancel);
+                        if (!canContinue)
+                            break;
 
                         var strategyState = await UpdateTradingStatesAsync(cancel);
                         m_logger.LogDebug(
@@ -202,13 +203,48 @@ namespace CryptoBlade.Services
                                 .Distinct()
                                 .ToArray();
 
+                            bool criticalLong = m_options.Value.CriticalMode.EnableCriticalModeLong 
+                                                && strategyState.TotalLongExposure > m_options.Value.CriticalMode.WalletExposureThresholdLong;
+                            bool criticalShort = m_options.Value.CriticalMode.EnableCriticalModeShort 
+                                                 && strategyState.TotalShortExposure > m_options.Value.CriticalMode.WalletExposureThresholdShort;
+
                             // by default already trading strategies can only maintain existing positions
                             Dictionary<string, ExecuteParams> executeParams =
                                 inTradeSymbols.ToDictionary(x => x, x => new ExecuteParams(
                                     false, 
                                     false, 
+                                    !criticalLong,
+                                    !criticalShort,
                                     unstuckingLong.Contains(x), 
                                     unstuckingShort.Contains(x)));
+                            
+                            if (criticalLong)
+                            {
+                                // select highest exposure strategy to continue trading
+                                var highestExposure = Strategies.Values
+                                    .Where(x => x.IsInLongTrade && x.CurrentExposureLong.HasValue)
+                                    .MaxBy(x => x.CurrentExposureLong!.Value);
+                                if (highestExposure != null)
+                                {
+                                    executeParams.TryGetValue(highestExposure.Symbol, out var existingParams);
+                                    executeParams[highestExposure.Symbol] =
+                                        existingParams with { AllowExtraLong = true };
+                                }
+                            }
+
+                            if (criticalShort)
+                            {
+                                // select highest exposure strategy to continue trading
+                                var highestExposure = Strategies.Values
+                                    .Where(x => x.IsInShortTrade && x.CurrentExposureShort.HasValue)
+                                    .MaxBy(x => x.CurrentExposureShort!.Value);
+                                if (highestExposure != null)
+                                {
+                                    executeParams.TryGetValue(highestExposure.Symbol, out var existingParams);
+                                    executeParams[highestExposure.Symbol] =
+                                        existingParams with { AllowExtraShort = true };
+                                }
+                            }
 
                             var inLongTradeSymbols = Strategies.Values.Where(x => x.IsInLongTrade).ToArray();
                             var inShortTradeSymbols = Strategies.Values.Where(x => x.IsInShortTrade).ToArray();
@@ -223,11 +259,13 @@ namespace CryptoBlade.Services
                             bool canAddLongPositions = remainingLongSlots > 0
                                                        && strategyState.TotalWalletLongExposure.HasValue
                                                        && strategyState.TotalWalletLongExposure.Value <
-                                                       dynamicBotCount.TargetLongExposure;
+                                                       dynamicBotCount.TargetLongExposure
+                                                       && !criticalLong;
                             bool canAddShortPositions = remainingShortSlots > 0
                                                         && strategyState.TotalWalletShortExposure.HasValue
                                                         && strategyState.TotalWalletShortExposure.Value <
-                                                        dynamicBotCount.TargetShortExposure;
+                                                        dynamicBotCount.TargetShortExposure
+                                                        && !criticalShort;
                             m_logger.LogDebug(
                                 "Can add long positions: '{CanAddLongPositions}', can add short positions: '{CanAddShortPositions}'.",
                                 canAddLongPositions,
@@ -236,6 +274,22 @@ namespace CryptoBlade.Services
                             HashSet<string> tradeSymbols = new HashSet<string>();
                             foreach (string inTradeSymbol in inTradeSymbols)
                                 tradeSymbols.Add(inTradeSymbol);
+
+                            string strategySelectIndicator;
+                            decimal minSelectValue;
+                            switch (m_options.Value.StrategySelectPreference)
+                            {
+                                case StrategySelectPreference.Volume:
+                                    strategySelectIndicator = nameof(IndicatorType.MainTimeFrameVolume);
+                                    minSelectValue = m_options.Value.MinimumVolume;
+                                    break;
+                                case StrategySelectPreference.NormalizedAverageTrueRange:
+                                    strategySelectIndicator = nameof(IndicatorType.NormalizedAverageTrueRange);
+                                    minSelectValue = m_options.Value.MinNormalizedAverageTrueRangePeriod;
+                                    break;
+                                default:
+                                    throw new ArgumentOutOfRangeException();
+                            }
 
                             if (canAddLongPositions)
                             {
@@ -247,16 +301,16 @@ namespace CryptoBlade.Services
                                         x.Value.Indicators
                                     })
                                     .Where(x => x.Indicators.Any(i =>
-                                        i.Name == nameof(IndicatorType.MainTimeFrameVolume) && i.Value is decimal))
+                                        i.Name == strategySelectIndicator && i.Value is decimal value && value >= minSelectValue))
                                     .Where(x => !x.Strategy.Value.IsInLongTrade && x.Strategy.Value.HasBuySignal &&
                                                 x.Strategy.Value.DynamicQtyLong.HasValue)
                                     .Select(x => new
                                     {
                                         Strategy = x,
-                                        MainTimeFrameVolume = (decimal)x.Indicators
-                                            .First(i => i.Name == nameof(IndicatorType.MainTimeFrameVolume)).Value
+                                        StrategySelectIndicator = (decimal)x.Indicators
+                                            .First(i => i.Name == strategySelectIndicator).Value
                                     })
-                                    .OrderByDescending(x => x.MainTimeFrameVolume)
+                                    .OrderByDescending(x => x.StrategySelectIndicator)
                                     .Take(longStrategiesPerStep)
                                     .Select(x => x.Strategy.Strategy.Value.Symbol)
                                     .ToArray();
@@ -283,16 +337,16 @@ namespace CryptoBlade.Services
                                         x.Value.Indicators
                                     })
                                     .Where(x => x.Indicators.Any(i =>
-                                        i.Name == nameof(IndicatorType.MainTimeFrameVolume) && i.Value is decimal))
+                                        i.Name == strategySelectIndicator && i.Value is decimal value && value >= minSelectValue))
                                     .Where(x => !x.Strategy.Value.IsInShortTrade && x.Strategy.Value.HasSellSignal &&
                                                 x.Strategy.Value.DynamicQtyShort.HasValue)
                                     .Select(x => new
                                     {
                                         Strategy = x,
-                                        MainTimeFrameVolume = (decimal)x.Indicators
-                                            .First(i => i.Name == nameof(IndicatorType.MainTimeFrameVolume)).Value
+                                        StrategySelectIndicator = (decimal)x.Indicators
+                                            .First(i => i.Name == strategySelectIndicator).Value
                                     })
-                                    .OrderByDescending(x => x.MainTimeFrameVolume)
+                                    .OrderByDescending(x => x.StrategySelectIndicator)
                                     .Take(shortStrategiesPerStep)
                                     .Select(x => x.Strategy.Strategy.Value.Symbol)
                                     .ToArray();

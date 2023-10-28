@@ -82,7 +82,7 @@ namespace CryptoBlade.Services
             m_initTask = Task.Run(async () => await InitStrategiesAsync(ctsCancel), ctsCancel);
         }
 
-        protected virtual async Task StrategyExecutionDataDelay(CancellationToken cancel)
+        protected virtual async Task StrategyExecutionDataDelayAsync(CancellationToken cancel)
         {
             int expectedUpdates = Strategies.Count;
             await StrategyExecutionChannel.Reader.WaitToReadAsync(cancel);
@@ -100,9 +100,9 @@ namespace CryptoBlade.Services
             await Task.Delay(TimeSpan.FromSeconds(10), cancel);
         }
 
-        protected virtual Task StrategyExecutionNextStep(CancellationToken cancel)
+        protected virtual Task<bool> StrategyExecutionNextStepAsync(CancellationToken cancel)
         {
-            return Task.CompletedTask;
+            return Task.FromResult(true);
         }
 
         protected async Task ProcessCandlesAsync(CancellationToken cancel)
@@ -129,17 +129,58 @@ namespace CryptoBlade.Services
             }
         }
 
-        protected async Task ProcessStrategyDataAsync(CancellationToken cancel)
+        protected async Task EvaluateSignalsAsync(CancellationToken cancel)
         {
-            await StrategyExecutionNextStep(cancel);
-            await StrategyExecutionDataDelay(cancel);
+            List<Task> evaluateTasks = new List<Task>();
+            foreach (var strategy in m_strategies.Values)
+            {
+                Task evaluateTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await strategy.EvaluateSignalsAsync(cancel);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+                    catch (Exception e)
+                    {
+                        m_logger.LogWarning(e, "Error while evaluating signals for strategy {Name} for symbol {Symbol}",
+                                                       strategy.Name, strategy.Symbol);
+                    }
+                }, cancel);
+                evaluateTasks.Add(evaluateTask);
+            }
+            await Task.WhenAll(evaluateTasks);
+        }
+
+        protected async Task<bool> ProcessStrategyDataAsync(CancellationToken cancel)
+        {
+            bool canContinue = await StrategyExecutionNextStepAsync(cancel);
+            if (!canContinue)
+                return canContinue;
+            await StrategyExecutionDataDelayAsync(cancel);
             await ProcessTickersAsync(cancel);
             await ProcessCandlesAsync(cancel);
+            await EvaluateSignalsAsync(cancel);
+            return canContinue;
         }
 
         protected virtual Task PreInitializationPhaseAsync(CancellationToken cancel)
         {
             return Task.CompletedTask;
+        }
+
+        protected virtual async Task DelayBetweenEachSymbol(CancellationToken cancel)
+        {
+            TimeSpan delayBetweenEachSymbol = TimeSpan.FromMilliseconds(500);
+            await Task.Delay(delayBetweenEachSymbol, cancel);
+        }
+
+        protected virtual async Task SymbolInitializationCallDelay(CancellationToken cancel)
+        {
+            TimeSpan callDelay = TimeSpan.FromMilliseconds(100);
+            await Task.Delay(callDelay, cancel);
         }
 
         private async Task InitStrategiesAsync(CancellationToken cancel)
@@ -161,6 +202,7 @@ namespace CryptoBlade.Services
 
             foreach (ITradingStrategy strategy in m_strategies.Values)
             {
+                await DelayBetweenEachSymbol(cancel);
                 if (symbolInfoDict.TryGetValue(strategy.Symbol, out var info))
                     await strategy.SetupSymbolAsync(info, cancel);
             }
@@ -191,6 +233,7 @@ namespace CryptoBlade.Services
             List<Task> initTasks = new();
             foreach (var strategy in m_strategies.Values)
             {
+                await DelayBetweenEachSymbol(cancel);
                 var initTask = InitializeStrategy(strategy, cancel);
                 initTasks.Add(initTask);
             }
@@ -225,27 +268,21 @@ namespace CryptoBlade.Services
 
         private async void OnTicker(string symbol, Ticker ticker)
         {
-            using (await m_lock.LockAsync())
-            {
-                if (m_strategies.TryGetValue(symbol, out _))
-                    await TickerChannel.Writer.WriteAsync(new SymbolTicker(symbol, ticker));
-            }
+            if (m_strategies.TryGetValue(symbol, out _))
+                await TickerChannel.Writer.WriteAsync(new SymbolTicker(symbol, ticker));
         }
 
         private async void OnKlineUpdate(string symbol, Candle candle)
         {
-            using (await m_lock.LockAsync())
+            if (m_strategies.TryGetValue(symbol, out var strategy))
             {
-                if (m_strategies.TryGetValue(symbol, out var strategy))
+                await CandleChannel.Writer.WriteAsync(new SymbolCandle(symbol, candle));
+                bool isPrimaryCandle = strategy.RequiredTimeFrameWindows.Any(x => x.TimeFrame == candle.TimeFrame);
+                if (isPrimaryCandle)
                 {
-                    await CandleChannel.Writer.WriteAsync(new SymbolCandle(symbol, candle));
-                    bool isPrimaryCandle = strategy.RequiredTimeFrameWindows.Any(x => x.TimeFrame == candle.TimeFrame);
-                    if (isPrimaryCandle)
-                    {
-                        m_logger.LogDebug(
-                            $"Strategy {strategy.Name}:{strategy.Symbol} received primary candle. Scheduling trade execution.");
-                        await m_strategyExecutionChannel.Writer.WriteAsync(strategy.Symbol, CancellationToken.None);
-                    }
+                    m_logger.LogDebug(
+                        $"Strategy {strategy.Name}:{strategy.Symbol} received primary candle. Scheduling trade execution.");
+                    await m_strategyExecutionChannel.Writer.WriteAsync(strategy.Symbol, CancellationToken.None);
                 }
             }
         }
@@ -310,8 +347,9 @@ namespace CryptoBlade.Services
             using (await m_lock.LockAsync())
             {
                 List<Task> initTasks = new List<Task>();
-                foreach (var tradingStrategy in m_strategies)
+                foreach (var tradingStrategy in m_strategies.Where(x => !x.Value.ConsistentData))
                 {
+                    await DelayBetweenEachSymbol(cancel);
                     var initTask = InitializeStrategy(tradingStrategy.Value, cancel);
                     initTasks.Add(initTask);
                 }
@@ -326,12 +364,15 @@ namespace CryptoBlade.Services
             List<Candle> allCandles = new List<Candle>();
             foreach (var timeFrame in timeFrames)
             {
+                await SymbolInitializationCallDelay(cancel);
                 var candles = await m_restClient.GetKlinesAsync(symbol, timeFrame.TimeFrame, timeFrame.WindowSize + 1, cancel);
                 
                 allCandles.AddRange(candles);
             }
 
+            await SymbolInitializationCallDelay(cancel);
             var ticker = await m_restClient.GetTickerAsync(symbol, cancel);
+            await SymbolInitializationCallDelay(cancel);
             await strategy.InitializeAsync(allCandles.ToArray(), ticker, cancel);
         }
 

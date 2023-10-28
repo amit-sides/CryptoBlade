@@ -22,6 +22,8 @@
         MainTimeFrameVolume,
         MfiTrend,
         EriTrend,
-        LinearRegressionPrice,
+        LinearRegressionPriceShort,
+        LinearRegressionPriceLong,
+        NormalizedAverageTrueRange
     }
 }
