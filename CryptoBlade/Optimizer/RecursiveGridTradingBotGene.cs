@@ -1,0 +1,34 @@
+﻿namespace CryptoBlade.Optimizer
+{
+    public enum RecursiveGridTradingBotGene
+    {
+        WalletExposureLong,
+        WalletExposureShort,
+        UnstuckingEnabled,
+        SlowUnstuckThresholdPercent,
+        SlowUnstuckPositionThresholdPercent,
+        SlowUnstuckPercentStep,
+        ForceUnstuckThresholdPercent,
+        ForceUnstuckPositionThresholdPercent,
+        ForceUnstuckPercentStep,
+        ForceKillTheWorst,
+        MinimumVolume,
+        TargetLongExposure,
+        TargetShortExposure,
+        MaxLongStrategies,
+        MaxShortStrategies,
+        EnableCriticalModeLong,
+        EnableCriticalModeShort,
+        CriticalModelWalletExposureThresholdLong,
+        CriticalModelWalletExposureThresholdShort,
+        SpotRebalancingRatio,
+        DDownFactorLong,
+        InitialQtyPctLong,
+        ReentryPositionPriceDistanceLong,
+        ReentryPositionPriceDistanceWalletExposureWeightingLong,
+        DDownFactorShort,
+        InitialQtyPctShort,
+        ReentryPositionPriceDistanceShort,
+        ReentryPositionPriceDistanceWalletExposureWeightingShort,
+    }
+}
